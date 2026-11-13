@@ -1,3 +1,2 @@
-using System.Windows;
 namespace NovaCapture;
-public partial class App : Application { }
+public partial class App : System.Windows.Application { }
