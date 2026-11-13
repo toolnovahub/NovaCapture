@@ -15,12 +15,40 @@ public partial class MainWindow : Window
     private Process? _recorder;
     private string? _videoPath;
     private bool _stopping;
+    private static readonly string SettingsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NovaCapture", "last-folder.txt");
 
     public MainWindow()
     {
         InitializeComponent();
+        try { if (File.Exists(SettingsPath) && Directory.Exists(File.ReadAllText(SettingsPath).Trim())) _folder = File.ReadAllText(SettingsPath).Trim(); } catch { }
         FolderBox.Text = _folder;
         Closed += (_, _) => { try { if (_recorder is { HasExited: false }) _recorder.Kill(entireProcessTree: true); } catch { } };
+    }
+
+    private void RememberFolder(string path)
+    {
+        var dir = Path.GetDirectoryName(path);
+        if (string.IsNullOrEmpty(dir)) return;
+        _folder = dir;
+        FolderBox.Text = _folder;
+        try { Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)!); File.WriteAllText(SettingsPath, _folder); } catch { }
+    }
+
+    private string? ChooseSavePath(string extension, string filter, string prefix)
+    {
+        var dialog = new Microsoft.Win32.SaveFileDialog
+        {
+            Title = extension == ".png" ? "Salvează captura de ecran" : "Salvează înregistrarea video",
+            Filter = filter,
+            DefaultExt = extension,
+            AddExtension = true,
+            InitialDirectory = Directory.Exists(_folder) ? _folder : Environment.GetFolderPath(Environment.SpecialFolder.MyPictures),
+            FileName = $"{prefix}_{Stamp()}{extension}",
+            OverwritePrompt = true
+        };
+        if (dialog.ShowDialog(this) != true) return null;
+        RememberFolder(dialog.FileName);
+        return dialog.FileName;
     }
 
     private void SetStatus(string value) => StatusText.Text = value;
@@ -30,8 +58,8 @@ public partial class MainWindow : Window
     {
         try
         {
-            Directory.CreateDirectory(_folder);
-            var path = Path.Combine(_folder, $"Screenshot_{Stamp()}.png");
+            var path = ChooseSavePath(".png", "PNG image (*.png)|*.png", "Screenshot");
+            if (path is null) { SetStatus("Captura anulată."); return; }
             // Temporarily hide our window so it does not appear in the capture.
             Hide();
             await Task.Delay(300);
@@ -52,7 +80,7 @@ public partial class MainWindow : Window
     private void ChooseFolder_Click(object sender, RoutedEventArgs e)
     {
         using var dialog = new Forms.FolderBrowserDialog { Description = "Alege folderul pentru capturi" };
-        if (dialog.ShowDialog() == Forms.DialogResult.OK) { _folder = dialog.SelectedPath; FolderBox.Text = _folder; }
+        if (dialog.ShowDialog() == Forms.DialogResult.OK) { _folder = dialog.SelectedPath; FolderBox.Text = _folder; try { Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)!); File.WriteAllText(SettingsPath, _folder); } catch { } }
     }
 
     private void OpenFolder_Click(object sender, RoutedEventArgs e)
@@ -75,8 +103,9 @@ public partial class MainWindow : Window
         {
             var ffmpeg = FindFFmpeg();
             if (ffmpeg is null) { SetStatus("FFmpeg nu a fost găsit. Pune ffmpeg.exe lângă NovaCapture.exe sau în PATH."); return; }
-            Directory.CreateDirectory(_folder);
-            _videoPath = Path.Combine(_folder, $"Recording_{Stamp()}.mp4");
+            var selectedPath = ChooseSavePath(".mp4", "MP4 video (*.mp4)|*.mp4", "Recording");
+            if (selectedPath is null) { SetStatus("Înregistrarea anulată."); return; }
+            _videoPath = selectedPath;
             var screen = Forms.Screen.PrimaryScreen?.Bounds ?? throw new InvalidOperationException("Monitorul principal nu a fost detectat.");
             // gdigrab records the primary display area; desktop coordinates are explicit for multi-monitor setups.
             var args = $"-hide_banner -loglevel error -f gdigrab -framerate 30 -offset_x {screen.Left} -offset_y {screen.Top} -video_size {screen.Width}x{screen.Height} -i desktop -c:v libx264 -preset ultrafast -crf 23 -pix_fmt yuv420p -movflags +faststart \"{_videoPath}\"";
