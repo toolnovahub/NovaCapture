@@ -13,7 +13,29 @@ jobs:
           dotnet-version: '8.0.x'
       - name: Publish self-contained Windows EXE
         run: dotnet publish NovaCapture.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:EnableWindowsTargeting=true -o publish
+      - name: Download and bundle FFmpeg for screen recording
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip'
+          Invoke-WebRequest -Uri $url -OutFile ffmpeg-release-essentials.zip
+          Expand-Archive -LiteralPath ffmpeg-release-essentials.zip -DestinationPath ffmpeg-dist -Force
+          $ffmpeg = Get-ChildItem -Path ffmpeg-dist -Filter ffmpeg.exe -Recurse -File | Select-Object -First 1
+          if (-not $ffmpeg) { throw 'ffmpeg.exe not found in FFmpeg archive' }
+          Copy-Item -LiteralPath $ffmpeg.FullName -Destination publish/ffmpeg.exe -Force
+          $license = Get-ChildItem -Path ffmpeg-dist -Filter LICENSE -Recurse -File | Select-Object -First 1
+          if ($license) { Copy-Item -LiteralPath $license.FullName -Destination publish/FFmpeg-LICENSE.txt -Force }
+          @'
+          FFmpeg is a separate third-party executable bundled with NovaCapture.
+          FFmpeg project: https://ffmpeg.org/
+          Binary distribution: https://www.gyan.dev/ffmpeg/builds/
+          License and source details: https://ffmpeg.org/legal.html
+          FFmpeg builds can contain GPL-licensed components. Review the
+          distributor's license and source obligations before redistribution.
+          '@ | Set-Content -Path publish/FFmpeg-NOTICE.txt -Encoding UTF8
+          if (-not (Test-Path publish/ffmpeg.exe)) { throw 'FFmpeg packaging failed' }
       - uses: actions/upload-artifact@v4
         with:
           name: NovaCapture-Windows-x64
           path: publish/
+          if-no-files-found: error
