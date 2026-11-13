@@ -108,13 +108,18 @@ public partial class MainWindow : Window
             _videoPath = selectedPath;
             var screen = Forms.Screen.PrimaryScreen?.Bounds ?? throw new InvalidOperationException("Monitorul principal nu a fost detectat.");
             // gdigrab records the primary display area; desktop coordinates are explicit for multi-monitor setups.
-            var args = $"-hide_banner -loglevel error -f gdigrab -framerate 30 -offset_x {screen.Left} -offset_y {screen.Top} -video_size {screen.Width}x{screen.Height} -i desktop -c:v libx264 -preset ultrafast -crf 23 -pix_fmt yuv420p -movflags +faststart \"{_videoPath}\"";
+            var ultra = QualityCombo.SelectedIndex == 1;
+            var fps = ultra ? 60 : 30;
+            var crf = ultra ? 15 : 23;
+            var preset = ultra ? "veryfast" : "ultrafast";
+            var args = $"-hide_banner -loglevel error -f gdigrab -framerate {fps} -offset_x {screen.Left} -offset_y {screen.Top} -video_size {screen.Width}x{screen.Height} -i desktop -c:v libx264 -preset {preset} -crf {crf} -pix_fmt yuv420p -movflags +faststart \"{_videoPath}\"";
             _recorder = new Process { StartInfo = new ProcessStartInfo(ffmpeg, args) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardError = true } };
             _recorder.Start();
             _stopping = false;
             StartButton.IsEnabled = false;
+            QualityCombo.IsEnabled = false;
             StopButton.IsEnabled = true;
-            SetStatus("Înregistrare pornită. Apasă Stop pentru salvare MP4.");
+            SetStatus($"Înregistrare pornită: {fps} FPS, CRF {crf}, rezoluție nativă. Apasă Stop pentru salvare MP4.");
             await Task.Delay(650);
             if (_recorder.HasExited && !_stopping)
             {
@@ -157,6 +162,7 @@ public partial class MainWindow : Window
         _recorder = null;
         _stopping = false;
         StartButton.IsEnabled = true;
+        QualityCombo.IsEnabled = true;
         StopButton.IsEnabled = false;
     }
 }
