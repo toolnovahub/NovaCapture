@@ -7,6 +7,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using Forms = System.Windows.Forms;
+using NAudio.Wave;
 
 namespace NovaCapture;
 public partial class MainWindow : Window
@@ -15,6 +16,13 @@ public partial class MainWindow : Window
     private Process? _recorder;
     private string? _videoPath;
     private bool _stopping;
+    private WasapiLoopbackCapture? _systemCapture;
+    private WaveInEvent? _micCapture;
+    private WaveFileWriter? _systemWriter;
+    private WaveFileWriter? _micWriter;
+    private string? _systemWav;
+    private string? _micWav;
+    private string? _tempAudioDir;
     private static readonly string SettingsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NovaCapture", "last-folder.txt");
 
     public MainWindow()
@@ -97,6 +105,102 @@ public partial class MainWindow : Window
         return paths.Select(p => Path.Combine(p.Trim().Trim('"'), "ffmpeg.exe")).FirstOrDefault(File.Exists);
     }
 
+
+    private void StartAudio()
+    {
+        var system = SystemAudioCheck.IsChecked == true;
+        var mic = MicAudioCheck.IsChecked == true;
+        if (!system && !mic) return;
+        _tempAudioDir = Path.Combine(Path.GetTempPath(), "NovaCapture", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(_tempAudioDir);
+        try
+        {
+            if (system)
+            {
+                _systemWav = Path.Combine(_tempAudioDir, "system.wav");
+                _systemCapture = new WasapiLoopbackCapture();
+                _systemWriter = new WaveFileWriter(_systemWav, _systemCapture.WaveFormat);
+                _systemCapture.DataAvailable += (_, a) => _systemWriter?.Write(a.Buffer, 0, a.BytesRecorded);
+                _systemCapture.StartRecording();
+            }
+            if (mic)
+            {
+                if (WaveInEvent.DeviceCount == 0) throw new InvalidOperationException("Nu a fost găsit niciun microfon. Debifează Microfon pentru a continua.");
+                _micWav = Path.Combine(_tempAudioDir, "mic.wav");
+                _micCapture = new WaveInEvent { WaveFormat = new WaveFormat(48000, 16, 1), BufferMilliseconds = 100 };
+                _micWriter = new WaveFileWriter(_micWav, _micCapture.WaveFormat);
+                _micCapture.DataAvailable += (_, a) => _micWriter?.Write(a.Buffer, 0, a.BytesRecorded);
+                _micCapture.StartRecording();
+            }
+        }
+        catch { StopAudio(); throw; }
+    }
+
+    private void StopAudio()
+    {
+        try { _systemCapture?.StopRecording(); } catch { }
+        try { _micCapture?.StopRecording(); } catch { }
+        System.Threading.Thread.Sleep(250);
+        _systemCapture?.Dispose(); _systemCapture = null;
+        _micCapture?.Dispose(); _micCapture = null;
+        _systemWriter?.Dispose(); _systemWriter = null;
+        _micWriter?.Dispose(); _micWriter = null;
+    }
+
+    private void CleanAudio()
+    {
+        if (_tempAudioDir is not null)
+        {
+            try { Directory.Delete(_tempAudioDir, true); } catch { }
+        }
+        _tempAudioDir = null;
+        _systemWav = null;
+        _micWav = null;
+    }
+
+    private async Task<string> MergeAudioAsync(string ffmpeg, string videoPath)
+    {
+        var tracks = new[] { _systemWav, _micWav }
+            .Where(p => p is not null && File.Exists(p) && new FileInfo(p).Length > 44)
+            .ToArray();
+        if (tracks.Length == 0) return "Video salvat fără audio (nu s-au capturat date audio).";
+        var mergedPath = Path.Combine(Path.GetDirectoryName(videoPath)!, "NovaCapture_mux_" + Guid.NewGuid().ToString("N") + ".mp4");
+        var start = new ProcessStartInfo(ffmpeg) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true };
+        start.ArgumentList.Add("-hide_banner");
+        start.ArgumentList.Add("-loglevel"); start.ArgumentList.Add("error");
+        start.ArgumentList.Add("-y");
+        start.ArgumentList.Add("-i"); start.ArgumentList.Add(videoPath);
+        foreach (var track in tracks) { start.ArgumentList.Add("-i"); start.ArgumentList.Add(track!); }
+        if (tracks.Length == 2)
+        {
+            start.ArgumentList.Add("-filter_complex");
+            start.ArgumentList.Add("[1:a][2:a]amix=inputs=2:duration=longest:dropout_transition=0[a]");
+            start.ArgumentList.Add("-map"); start.ArgumentList.Add("0:v:0");
+            start.ArgumentList.Add("-map"); start.ArgumentList.Add("[a]");
+        }
+        else
+        {
+            start.ArgumentList.Add("-map"); start.ArgumentList.Add("0:v:0");
+            start.ArgumentList.Add("-map"); start.ArgumentList.Add("1:a:0");
+        }
+        start.ArgumentList.Add("-c:v"); start.ArgumentList.Add("copy");
+        start.ArgumentList.Add("-c:a"); start.ArgumentList.Add("aac");
+        start.ArgumentList.Add("-b:a"); start.ArgumentList.Add("192k");
+        start.ArgumentList.Add("-shortest");
+        start.ArgumentList.Add(mergedPath);
+        using var process = Process.Start(start) ?? throw new Exception("FFmpeg nu a pornit pentru audio.");
+        var errorTask = process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync();
+        var error = await errorTask;
+        if (process.ExitCode != 0 || !File.Exists(mergedPath))
+        {
+            try { File.Delete(mergedPath); } catch { }
+            throw new Exception("Audio nu a putut fi adăugat: " + error);
+        }
+        File.Move(mergedPath, videoPath, true);
+        return "Video și audio salvate.";
+    }
+
     private async void Start_Click(object sender, RoutedEventArgs e)
     {
         try
@@ -115,9 +219,12 @@ public partial class MainWindow : Window
             var args = $"-hide_banner -loglevel error -f gdigrab -framerate {fps} -offset_x {screen.Left} -offset_y {screen.Top} -video_size {screen.Width}x{screen.Height} -i desktop -c:v libx264 -preset {preset} -crf {crf} -pix_fmt yuv420p -movflags +faststart \"{_videoPath}\"";
             _recorder = new Process { StartInfo = new ProcessStartInfo(ffmpeg, args) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardError = true } };
             _recorder.Start();
+            StartAudio();
             _stopping = false;
             StartButton.IsEnabled = false;
             QualityCombo.IsEnabled = false;
+            SystemAudioCheck.IsEnabled = false;
+            MicAudioCheck.IsEnabled = false;
             StopButton.IsEnabled = true;
             SetStatus($"Înregistrare pornită: {fps} FPS, CRF {crf}, rezoluție nativă. Apasă Stop pentru salvare MP4.");
             await Task.Delay(650);
@@ -147,9 +254,16 @@ public partial class MainWindow : Window
                 try { await _recorder.WaitForExitAsync(timeout.Token); }
                 catch (OperationCanceledException) { _recorder.Kill(entireProcessTree: true); await _recorder.WaitForExitAsync(); throw new Exception("FFmpeg nu s-a oprit la timp; fișierul poate fi incomplet."); }
             }
+            StopAudio();
             var error = await _recorder.StandardError.ReadToEndAsync();
             if (_recorder.ExitCode != 0) SetStatus($"Înregistrarea a eșuat: {error}");
-            else if (_videoPath is not null && File.Exists(_videoPath)) SetStatus($"Video salvat: {_videoPath}");
+            else if (_videoPath is not null && File.Exists(_videoPath))
+            {
+                SetStatus("Adaug sunetul în MP4...");
+                var ffmpeg = FindFFmpeg() ?? throw new Exception("FFmpeg lipsește.");
+                var result = await MergeAudioAsync(ffmpeg, _videoPath);
+                SetStatus($"{result} {_videoPath}");
+            }
             else SetStatus("FFmpeg s-a închis, dar fișierul MP4 nu a fost găsit.");
         }
         catch (Exception ex) { SetStatus($"Eroare la oprire: {ex.Message}"); }
@@ -158,11 +272,15 @@ public partial class MainWindow : Window
 
     private void ResetRecording()
     {
+        StopAudio();
+        CleanAudio();
         _recorder?.Dispose();
         _recorder = null;
         _stopping = false;
         StartButton.IsEnabled = true;
         QualityCombo.IsEnabled = true;
+        SystemAudioCheck.IsEnabled = true;
+        MicAudioCheck.IsEnabled = true;
         StopButton.IsEnabled = false;
     }
 }
